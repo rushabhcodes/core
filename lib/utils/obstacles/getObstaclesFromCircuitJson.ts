@@ -1,12 +1,12 @@
-import { getObstaclesFromRoute } from "./getObstaclesFromRoute"
-import type { ConnectivityMap } from "circuit-json-to-connectivity-map"
 import type { AnyCircuitElement } from "circuit-json"
-import {
-  generateApproximatingRects,
-  type RotatedRect,
-} from "./generateApproximatingRects"
-import { fillPolygonWithRects } from "./fillPolygonWithRects"
+import type { ConnectivityMap } from "circuit-json-to-connectivity-map"
 import { fillCircleWithRects } from "./fillCircleWithRects"
+import { fillPolygonWithRects } from "./fillPolygonWithRects"
+import {
+  type RotatedRect,
+  generateApproximatingRects,
+} from "./generateApproximatingRects"
+import { getObstaclesFromRoute } from "./getObstaclesFromRoute"
 import type { Obstacle } from "./types"
 
 const EVERY_LAYER = ["top", "inner1", "inner2", "bottom"]
@@ -26,7 +26,6 @@ export const getObstaclesFromCircuitJson = (
     if (element.type === "pcb_smtpad") {
       if (element.shape === "circle") {
         obstacles.push({
-          // @ts-ignore
           type: "oval",
           layers: [element.layer],
           center: {
@@ -71,7 +70,6 @@ export const getObstaclesFromCircuitJson = (
     } else if (element.type === "pcb_keepout") {
       if (element.shape === "circle") {
         obstacles.push({
-          // @ts-ignore
           type: "oval",
           layers: element.layers,
           center: {
@@ -146,8 +144,8 @@ export const getObstaclesFromCircuitJson = (
     } else if (element.type === "pcb_hole") {
       if (element.hole_shape === "oval") {
         obstacles.push({
-          // @ts-ignore
           type: "oval",
+          layers: EVERY_LAYER,
           center: {
             x: element.x,
             y: element.y,
@@ -200,7 +198,6 @@ export const getObstaclesFromCircuitJson = (
     } else if (element.type === "pcb_plated_hole") {
       if (element.shape === "circle") {
         obstacles.push({
-          // @ts-ignore
           type: "oval",
           layers: EVERY_LAYER,
           center: {
@@ -226,7 +223,6 @@ export const getObstaclesFromCircuitJson = (
         })
       } else if (element.shape === "oval" || element.shape === "pill") {
         obstacles.push({
-          // @ts-ignore
           type: "oval",
           layers: EVERY_LAYER,
           center: {

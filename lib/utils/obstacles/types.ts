@@ -1,6 +1,5 @@
 export type Obstacle = {
-  // TODO include ovals
-  type: "rect" // NOTE: most datasets do not contain ovals
+  type: "rect" | "oval"
   layers: string[]
   center: { x: number; y: number }
   width: number
