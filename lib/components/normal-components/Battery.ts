@@ -14,7 +14,7 @@ export class Battery extends NormalComponent<
       schematicSymbolName: (this.props.symbolName ??
         ("battery" as BaseSymbolName)) as BaseSymbolName,
       zodProps: batteryProps,
-      sourceFtype: "simple_power_source" as Ftype,
+      sourceFtype: "simple_battery" as Ftype,
     }
   }
 
@@ -32,13 +32,14 @@ export class Battery extends NormalComponent<
     const { _parsedProps: props } = this
     const source_component = db.source_component.insert({
       name: this.name,
-      ftype: "simple_power_source" as Ftype,
+      ftype: "simple_battery" as Ftype,
       capacity: props.capacity,
+      voltage: props.voltage,
       supplier_part_numbers: props.supplierPartNumbers,
       manufacturer_part_number: props.manufacturerPartNumber ?? props.mfn,
       are_pins_interchangeable: false,
       display_name: props.displayName,
-    } as SourceSimpleBatteryInput)
+    } as SourceSimpleBatteryInput & { voltage?: number })
     this.source_component_id = source_component.source_component_id
   }
 }
