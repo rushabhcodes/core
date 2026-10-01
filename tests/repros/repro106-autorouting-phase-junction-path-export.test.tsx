@@ -5,9 +5,9 @@ import { getAutoroutingPhasePcbTracePaths } from "lib/components/primitive-compo
 import type { Port } from "lib/components/primitive-components/Port"
 import type { SimpleRouteJson } from "lib/utils/autorouting/SimpleRouteJson"
 
-test("repro106: routed branch-to-branch segment cannot be exported as a port path", () => {
-  // First observed on SparkFun's CD74HC4067 mux breakout. The normal board build
-  // successfully routes, but core cannot save replayable phase paths for it.
+test("repro106: branched route exports replayable port-anchored paths", () => {
+  // First observed on SparkFun's CD74HC4067 mux breakout. Before this graph
+  // export fix, the board routed successfully but its branched paths were not saved.
   const terminals = [
     { name: "A", x: -2, y: 0 },
     { name: "B", x: 0, y: -2 },
@@ -16,6 +16,13 @@ test("repro106: routed branch-to-branch segment cannot be exported as a port pat
   ].map(({ name, x, y }) => {
     const port = {
       pcb_port_id: `pcb_port_${name}`,
+      root: {
+        db: {
+          pcb_port: {
+            get: () => ({ layers: ["top"] }),
+          },
+        },
+      },
       getPortSelector: () => `.U1 > port.${name}`,
       _getGlobalPcbPositionBeforeLayout: () => ({ x, y }),
       _getGlobalPcbPositionAfterLayout: () => ({ x, y }),
@@ -75,25 +82,32 @@ test("repro106: routed branch-to-branch segment cannot be exported as a port pat
   const [a, b, c, d] = terminals
   const traces = [
     {
+      connection_name: "shared_net",
       route: [
         wirePoint(a!.terminal.x, a!.terminal.y, "start", a!.port.pcb_port_id),
         wirePoint(0, 0, "end"),
       ],
     },
     {
+      connection_name: "shared_net",
       route: [
         wirePoint(b!.terminal.x, b!.terminal.y, "start", b!.port.pcb_port_id),
         wirePoint(0, 0, "end"),
       ],
     },
-    { route: [wirePoint(0, 0, "start"), wirePoint(4, 0, "end")] },
     {
+      connection_name: "shared_net",
+      route: [wirePoint(0, 0, "start"), wirePoint(4, 0, "end")],
+    },
+    {
+      connection_name: "shared_net",
       route: [
         wirePoint(4, 0, "start"),
         wirePoint(c!.terminal.x, c!.terminal.y, "end", c!.port.pcb_port_id),
       ],
     },
     {
+      connection_name: "shared_net",
       route: [
         wirePoint(4, 0, "start"),
         wirePoint(d!.terminal.x, d!.terminal.y, "end", d!.port.pcb_port_id),
@@ -118,8 +132,11 @@ test("repro106: routed branch-to-branch segment cannot be exported as a port pat
     isFanout: false,
   })
 
-  expect(result.pcbTracePaths).toBeUndefined()
-  expect(result.pcbTracePathsUnavailableReason).toBe(
-    "Routes contain a junction or endpoint that cannot select a unique PCB port",
-  )
+  expect(result.pcbTracePathsUnavailableReason).toBeUndefined()
+  expect(result.pcbTracePaths).toHaveLength(3)
+  expect(result.pcbTracePaths?.map((path) => path.connection)).toEqual([
+    ".U1 > port.A",
+    ".U1 > port.B",
+    ".U1 > port.C",
+  ])
 })

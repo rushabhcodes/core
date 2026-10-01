@@ -1,17 +1,17 @@
 import { fanoutTracePath } from "@tscircuit/props"
-import { applyToPoint, inverse } from "transformation-matrix"
 import type { PcbPort } from "circuit-json"
-import type { z } from "zod"
 import type {
   SimpleRouteJson,
   SimplifiedPcbTrace,
   SingleLayerConnectionPoint,
 } from "lib/utils/autorouting/SimpleRouteJson"
+import { applyToPoint, inverse } from "transformation-matrix"
+import type { z } from "zod"
 import type { Port } from "../Port"
 import type { IGroup } from "./IGroup"
 import type { ISubcircuit } from "./Subcircuit/ISubcircuit"
-import { getSavedPcbTracePathTransform } from "./get-saved-pcb-trace-path-transform"
 import { getSavedAutoroutingPhaseTracesFromPaths } from "./get-saved-autorouting-phase-traces"
+import { getSavedPcbTracePathTransform } from "./get-saved-pcb-trace-path-transform"
 
 export type AutoroutingPhasePcbTracePaths = {
   pcbTracePaths?: z.output<typeof fanoutTracePath>[]
@@ -20,6 +20,12 @@ export type AutoroutingPhasePcbTracePaths = {
 
 type PcbPortId = PcbPort["pcb_port_id"]
 type WireOrVia = Extract<SimplifiedPcbTrace["route"][number], { x: number }>
+
+type RoutedEdge = {
+  route: WireOrVia[]
+  start: string
+  end: string
+}
 
 const touches = (
   point: WireOrVia,
@@ -32,6 +38,230 @@ const touches = (
     : end
       ? point.to_layer
       : point.from_layer) === terminal.layer
+
+const getRouteEndpointLayer = (point: WireOrVia, end: boolean) =>
+  point.route_type === "wire"
+    ? point.layer
+    : end
+      ? point.to_layer
+      : point.from_layer
+
+const getRouteEndpointKey = (point: WireOrVia, end: boolean) =>
+  `${Math.round(point.x * 1e4)},${Math.round(point.y * 1e4)},${getRouteEndpointLayer(point, end)}`
+
+const reverseRoute = (route: WireOrVia[]) =>
+  route
+    .toReversed()
+    .map((point) =>
+      point.route_type === "via"
+        ? { ...point, from_layer: point.to_layer, to_layer: point.from_layer }
+        : point,
+    )
+
+/**
+ * A branched routed net can contain trace segments whose endpoints are both
+ * internal junctions. Saved paths are linear and port-anchored, so walk the
+ * route graph in terminal order and emit paths between consecutive terminals.
+ * The paths can share copper where a branched tree requires it; their union
+ * preserves the routed geometry while making each saved path replayable.
+ */
+const getBranchedRoutePaths = ({
+  group,
+  subcircuit,
+  input,
+  traces,
+  portsByPcbPortId,
+}: {
+  group: Pick<IGroup, "pcb_group_id" | "_computePcbGlobalTransformBeforeLayout">
+  subcircuit: Pick<ISubcircuit, "selectOne" | "selectAll">
+  input: SimpleRouteJson
+  traces: SimplifiedPcbTrace[]
+  portsByPcbPortId: Map<PcbPortId, Port>
+}): z.output<typeof fanoutTracePath>[] => {
+  if (input.connections.length === 0) throw new Error("No routed connections")
+
+  const routesByConnection = new Map<string, WireOrVia[][]>()
+  if (input.connections.length === 1) {
+    routesByConnection.set(
+      input.connections[0]!.name,
+      traces.map((trace) => trace.route as WireOrVia[]),
+    )
+  } else {
+    const connectionNames = new Set(
+      input.connections.map((connection) => connection.name),
+    )
+    for (const trace of traces) {
+      if (!trace.connection_name)
+        throw new Error("Branched routes need connection names")
+      if (!connectionNames.has(trace.connection_name))
+        throw new Error(
+          `Branched route references unknown connection: ${trace.connection_name}`,
+        )
+      const routes = routesByConnection.get(trace.connection_name) ?? []
+      routes.push(trace.route as WireOrVia[])
+      routesByConnection.set(trace.connection_name, routes)
+    }
+  }
+
+  const paths: z.output<typeof fanoutTracePath>[] = []
+  for (const connection of input.connections) {
+    const routes = routesByConnection.get(connection.name) ?? []
+    if (routes.length === 0) continue
+    if (
+      routes.some(
+        (route) =>
+          route.length < 2 ||
+          route.some(
+            (point) =>
+              point.route_type !== "wire" && point.route_type !== "via",
+          ),
+      )
+    ) {
+      throw new Error("Only port-anchored wire/via routes can be saved")
+    }
+
+    const edges: RoutedEdge[] = routes.map((route) => ({
+      route,
+      start: getRouteEndpointKey(route[0]!, false),
+      end: getRouteEndpointKey(route.at(-1)!, true),
+    }))
+    const adjacency = new Map<string, number[]>()
+    for (const [edgeIndex, edge] of edges.entries()) {
+      if (edge.start === edge.end)
+        throw new Error("Branched route contains a closed trace segment")
+      adjacency.set(edge.start, [
+        ...(adjacency.get(edge.start) ?? []),
+        edgeIndex,
+      ])
+      adjacency.set(edge.end, [...(adjacency.get(edge.end) ?? []), edgeIndex])
+    }
+
+    const terminalsByNode = new Map<
+      string,
+      { terminal: SingleLayerConnectionPoint; port: Port }[]
+    >()
+    for (const [nodeKey, edgeIndices] of adjacency) {
+      const candidates = connection.pointsToConnect.filter(
+        (terminal) =>
+          terminal.pcb_port_id &&
+          edgeIndices.some((edgeIndex) => {
+            const edge = edges[edgeIndex]!
+            const route = edge.route
+            return (
+              (edge.start === nodeKey && touches(route[0]!, terminal)) ||
+              (edge.end === nodeKey && touches(route.at(-1)!, terminal, true))
+            )
+          }),
+      )
+      if (candidates.length > 1)
+        throw new Error("Branched route endpoint touches multiple PCB ports")
+      const terminal = candidates[0]
+      if (!terminal?.pcb_port_id) continue
+      const port = portsByPcbPortId.get(terminal.pcb_port_id)
+      if (!port) throw new Error("Branched route PCB port was not found")
+      terminalsByNode.set(nodeKey, [{ terminal, port }])
+    }
+
+    const unvisited = new Set(adjacency.keys())
+    const terminalOrder: {
+      node: string
+      terminal: SingleLayerConnectionPoint
+      port: Port
+    }[] = []
+    const visit = (node: string, parentEdge: number | undefined) => {
+      unvisited.delete(node)
+      const terminal = terminalsByNode.get(node)?.[0]
+      if (terminal) terminalOrder.push({ node, ...terminal })
+      for (const edgeIndex of adjacency.get(node) ?? []) {
+        if (edgeIndex === parentEdge) continue
+        const edge = edges[edgeIndex]!
+        const next = edge.start === node ? edge.end : edge.start
+        if (!unvisited.has(next)) continue
+        visit(next, edgeIndex)
+      }
+    }
+    const firstNode = adjacency.keys().next().value as string | undefined
+    if (!firstNode) continue
+    visit(firstNode, undefined)
+    if (unvisited.size > 0)
+      throw new Error("Branched route contains disconnected trace segments")
+
+    const expectedPortTerminals = connection.pointsToConnect.filter(
+      (terminal) => terminal.pcb_port_id,
+    )
+    if (terminalOrder.length !== expectedPortTerminals.length)
+      throw new Error("Branched route does not reach every PCB port")
+    if (terminalOrder.length < 2)
+      throw new Error("Branched route needs at least two PCB ports")
+
+    const coveredEdges = new Set<number>()
+    for (
+      let terminalIndex = 0;
+      terminalIndex < terminalOrder.length - 1;
+      terminalIndex++
+    ) {
+      const source = terminalOrder[terminalIndex]!
+      const destination = terminalOrder[terminalIndex + 1]!
+      const queue = [source.node]
+      const previous = new Map<string, { node: string; edgeIndex: number }>()
+      const visited = new Set(queue)
+      while (queue.length && !visited.has(destination.node)) {
+        const node = queue.shift()!
+        for (const edgeIndex of adjacency.get(node) ?? []) {
+          const edge = edges[edgeIndex]!
+          const next = edge.start === node ? edge.end : edge.start
+          if (visited.has(next)) continue
+          visited.add(next)
+          previous.set(next, { node, edgeIndex })
+          queue.push(next)
+        }
+      }
+      if (!visited.has(destination.node))
+        throw new Error("Branched route cannot connect its PCB ports")
+
+      const pathEdges: { edgeIndex: number; from: string; to: string }[] = []
+      let node = destination.node
+      while (node !== source.node) {
+        const step = previous.get(node)
+        if (!step) throw new Error("Could not reconstruct branched route path")
+        pathEdges.unshift({
+          edgeIndex: step.edgeIndex,
+          from: step.node,
+          to: node,
+        })
+        node = step.node
+      }
+
+      const route: WireOrVia[] = []
+      for (const pathEdge of pathEdges) {
+        const edge = edges[pathEdge.edgeIndex]!
+        const edgeRoute =
+          pathEdge.from === edge.start ? edge.route : reverseRoute(edge.route)
+        route.push(...(route.length === 0 ? edgeRoute : edgeRoute.slice(1)))
+        coveredEdges.add(pathEdge.edgeIndex)
+      }
+      const selector =
+        source.terminal.port_selector ?? source.port.getPortSelector()
+      if (subcircuit.selectOne(selector, { type: "port" }) !== source.port)
+        throw new Error(`PCB port selector is not unique: ${selector}`)
+      const transform = inverse(
+        getSavedPcbTracePathTransform(group, source.port),
+      )
+      paths.push(
+        fanoutTracePath.parse({
+          connection: selector,
+          route: route.map((point) => ({
+            ...point,
+            ...applyToPoint(transform, point),
+          })),
+        }),
+      )
+    }
+    if (coveredEdges.size !== edges.length)
+      throw new Error("Branched route contains copper outside its saved paths")
+  }
+  return paths
+}
 
 /**
  * Export only this routing stage's copper, using port selectors and the enclosing
@@ -143,10 +373,28 @@ export function getAutoroutingPhasePcbTracePaths({
           break
         }
       }
-      if (!exported)
+      if (!exported) {
+        if (!isFanout) {
+          const branchedPaths = getBranchedRoutePaths({
+            group,
+            subcircuit,
+            input,
+            traces,
+            portsByPcbPortId,
+          })
+          getSavedAutoroutingPhaseTracesFromPaths({
+            group,
+            subcircuit,
+            paths: branchedPaths,
+            input,
+            isFanout,
+          })
+          return { pcbTracePaths: branchedPaths }
+        }
         throw new Error(
           "Routes contain a junction or endpoint that cannot select a unique PCB port",
         )
+      }
     }
     getSavedAutoroutingPhaseTracesFromPaths({
       group,
