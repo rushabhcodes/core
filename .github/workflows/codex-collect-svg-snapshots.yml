@@ -48,7 +48,7 @@ jobs:
         run: |
           for patch in /tmp/svg-snapshot-artifacts/*/snapshots.patch; do
             if [ -s "$patch" ]; then
-              git apply --allow-empty --include='*.svg' "$patch"
+              git apply --allow-empty --include='*.svg' --whitespace=fix "$patch"
             fi
           done
           git diff --check
