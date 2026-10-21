@@ -1,0 +1,66 @@
+name: Collect refreshed SVG snapshots
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - .github/workflows/codex-collect-svg-snapshots.yml
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  collect:
+    if: github.head_ref == 'codex/update-circuit-to-svg-0.0.453'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Wait for snapshot generation
+        uses: actions/github-script@v7
+        with:
+          script: |
+            for (let attempt = 0; attempt < 60; attempt++) {
+              const { data } = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: 39593206609,
+              })
+              if (data.status === 'completed') {
+                if (data.conclusion !== 'success') {
+                  throw new Error(`Snapshot generation concluded ${data.conclusion}`)
+                }
+                return
+              }
+              await new Promise((resolve) => setTimeout(resolve, 10000))
+            }
+            throw new Error('Timed out waiting for snapshot generation')
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 39593206609
+          pattern: svg-snapshots-shard-*
+          path: /tmp/svg-snapshot-artifacts
+      - name: Apply generated SVG snapshots
+        run: |
+          for patch in /tmp/svg-snapshot-artifacts/*/snapshots.patch; do
+            if [ -s "$patch" ]; then
+              git apply --allow-empty --include='*.svg' "$patch"
+            fi
+          done
+          git diff --check
+          git diff --stat
+      - name: Commit refreshed SVG snapshots
+        run: |
+          git add -- 'tests/**/__snapshots__/*.svg'
+          if git diff --cached --quiet; then
+            echo "No SVG snapshot changes were produced."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "test: refresh snapshots for updated SVG renderer"
+          git push origin HEAD:"${{ github.head_ref }}"
